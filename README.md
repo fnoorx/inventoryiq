@@ -21,6 +21,11 @@ transactions**) and deployed on two other operators' machines. This repository i
 public edition: the code is the real application, with the retailer, credentials and
 business data replaced by synthetic values so it can be read and run anywhere.
 
+The production deployment runs on AWS (ECS Fargate, RDS PostgreSQL) with Docker,
+Terraform, and a GitHub Actions CI/CD pipeline. This public edition uses SQLite so it
+runs anywhere without setup; the PostgreSQL support and infrastructure code are being
+ported here and will be added soon.
+
 ---
 
 ## Try it in 60 seconds
