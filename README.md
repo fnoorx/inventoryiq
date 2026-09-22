@@ -148,18 +148,74 @@ cases (barcode/label mismatch, multiple variants, unreadable sizes).
 
 ---
 
-## How it's organised
+## Architecture
+
+A single Python process. discord.py owns the event loop; every command handler hands
+off to a synchronous service function in a worker thread, so slow HTTP, Selenium and
+SQLite work never blocks Discord.
 
 ```
-Discord ──▶ cogs/          command parsing, embeds, buttons, channel routing
-             services/     domain logic + persistence (SQLite, Sheets, StockX, scrapers)
-             utils/        thin integration helpers (OAuth token cache, Sheets client)
-             tests/        offline suite; fakes for every external system
+                         Operators (Discord)
+                                 |
+                       commands / messages / buttons
+                                 |
+ +-------------------------------v---------------------------------+
+ |  bot.py            loads cogs, opt-in live startup              |
+ |  cogs/             one cog per channel: parse input, call one   |
+ |                    service in a worker thread, format the reply |
+ +-------------------------------+---------------------------------+
+                                 |  asyncio.to_thread
+ +-------------------------------v---------------------------------+
+ |  services/         all domain logic; external clients injected  |
+ |                                                                 |
+ |   inventory_service     pricing / sizes      launch/ (knapsack) |
+ |   inventory_repository  scrape_catalogue     label_intake       |
+ |   stockx (client)       catalogue_profit.    barcode / vision   |
+ |   stockx_order_sync     brand_catalogue      database_schema    |
+ +--+-----------+-----------+-----------+-----------+-----------+--+
+    |           |           |           |           |           |
+ SQLite     Google      StockX      Retailer    Selenium     OpenAI
+ (local)    Sheets      REST API    HTTP/JSON   + Chrome     vision
+ IDs, units, shared     market,     catalogue,  brand-wide   box-label
+ scans      ledger      GTIN,       launch      scan         read
+                        orders      stock
 ```
 
-Cogs never touch persistence or HTTP directly. They parse input, call one service
-function in a worker thread, and format the result. Services accept their external
-dependencies as parameters, which is what makes the whole suite runnable offline.
+**Layers and the rules between them**
+
+- `cogs/` never touch persistence or HTTP. They validate input, call exactly one
+  service function, and render embeds or button views. Channel routing lives in
+  [`utils/channels.py`](utils/channels.py).
+- `services/` hold every decision the business depends on. External clients (Sheets,
+  StockX, the scrapers, the vision model) are passed in as parameters, which is what
+  lets the whole suite run offline against fakes.
+- `utils/` are thin adapters: OAuth token cache for StockX, the gspread client, text
+  and currency formatting.
+
+**Data stores and what is authoritative**
+
+| Store | Holds | Role |
+|---|---|---|
+| SQLite (`inventory_units`, `inventory_id_sequence`, `label_scans`) | Permanent `INV-` IDs, unit cost and status, sync state, photo-intake results | Source of truth. Schema versioned with `PRAGMA user_version`; migrations upgrade old databases in place. |
+| Google Sheet (`Sales` worksheet) | One row per unit: cost, location, sale, payout | Shared ledger operators read and edit. Written second; failures are recorded as `retry_pending`, never allowed to mint a new ID. |
+| JSON state files (`data/`) | Last seen retailer catalogue; processed StockX order numbers | Baseline for `!scrape` diffs; idempotency record for order sync. |
+
+**The two write paths that matter**
+
+1. *Inbound (buying).* `!add` / `!photo` resolve the product against StockX, insert the
+   unit in SQLite inside one transaction keyed by the Discord message ID, then append
+   the Sheet row. Replaying the message returns the existing unit.
+2. *Outbound (selling).* `stockx_sync` polls payout-ready StockX orders on a timer,
+   matches each to the first unsold Sheet row with the same style and size, marks it sold
+   with payout details, and records the order so it is never applied twice.
+
+**Deployment**
+
+Production runs the same process as a Docker container on AWS ECS Fargate, with the
+database on RDS PostgreSQL, secrets in Secrets Manager, and Terraform for the
+infrastructure. A GitHub Actions pipeline runs the suite, builds the image, and applies
+migrations before deploy. This edition swaps the database for a local SQLite file and
+drops the infrastructure code so it runs with no setup; both are being ported over.
 
 ---
 
