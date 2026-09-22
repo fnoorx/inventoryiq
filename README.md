@@ -155,30 +155,30 @@ off to a synchronous service function in a worker thread, so slow HTTP, Selenium
 SQLite work never blocks Discord.
 
 ```
-                         Operators (Discord)
-                                 |
-                       commands / messages / buttons
-                                 |
- +-------------------------------v---------------------------------+
- |  bot.py            loads cogs, opt-in live startup              |
- |  cogs/             one cog per channel: parse input, call one   |
- |                    service in a worker thread, format the reply |
- +-------------------------------+---------------------------------+
-                                 |  asyncio.to_thread
- +-------------------------------v---------------------------------+
- |  services/         all domain logic; external clients injected  |
+                          Operators (Discord)
+                                  |
+                     commands / messages / buttons
+                                  |
+ +--------------------------------v--------------------------------+
+ |  bot.py         loads cogs, opt-in live startup                 |
+ |  cogs/          one cog per channel: parse input, call one      |
+ |                 service in a worker thread, format the reply    |
+ +--------------------------------+--------------------------------+
+                                  |  asyncio.to_thread
+ +--------------------------------v--------------------------------+
+ |  services/      all domain logic; external clients injected     |
  |                                                                 |
- |   inventory_service     pricing / sizes      launch/ (knapsack) |
- |   inventory_repository  scrape_catalogue     label_intake       |
- |   stockx (client)       catalogue_profit.    barcode / vision   |
- |   stockx_order_sync     brand_catalogue      database_schema    |
- +--+-----------+-----------+-----------+-----------+-----------+--+
-    |           |           |           |           |           |
- SQLite     Google      StockX      Retailer    Selenium     OpenAI
- (local)    Sheets      REST API    HTTP/JSON   + Chrome     vision
- IDs, units, shared     market,     catalogue,  brand-wide   box-label
- scans      ledger      GTIN,       launch      scan         read
-                        orders      stock
+ |   inventory_service      pricing / sizes       launch/ knapsack |
+ |   inventory_repository   scrape_catalogue      label_intake     |
+ |   stockx client          catalogue_profit.     barcode / vision |
+ |   stockx_order_sync      brand_catalogue       database_schema  |
+ +-----+----------+----------+----------+----------+----------+----+
+       |          |          |          |          |          |
+    SQLite     Google     StockX    Retailer   Selenium    OpenAI
+    (local)    Sheets     REST API  HTTP/JSON  + Chrome    vision
+    IDs,       shared     market,   catalogue, brand-wide  box-label
+    units,     ledger     GTIN,     launch     scan        read
+    scans                 orders    stock
 ```
 
 **Layers and the rules between them**
