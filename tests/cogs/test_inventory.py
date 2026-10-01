@@ -29,7 +29,7 @@ async def run_inline(function, *args, **kwargs):
 
 def sample_lookup():
     return StockxGtinLookupResult(
-        gtin="194817794556",
+        gtin="200000000011",
         title="Aether Test Shoe",
         style_id="qx1006-500",
         product_type="sneakers",
@@ -40,14 +40,14 @@ def sample_lookup():
 
 def test_parse_add_arguments_supports_scanner_shortcut():
     result = inventory.parse_add_arguments(
-        ("194817794556", "$180.50"),
+        ("200000000011", "$180.50"),
         default_location="DEMO",
     )
 
     assert result == (
         "DEMO",
         date.today().strftime("%m/%d/%Y"),
-        "194817794556",
+        "200000000011",
         None,
         180.50,
     )
@@ -95,9 +95,9 @@ def test_scanner_command_looks_up_variant_creates_unit_and_reports_id(monkeypatc
     monkeypatch.setattr(inventory, "lookup_gtin", lookup_gtin)
     monkeypatch.setattr(inventory, "create_inventory_unit", create_unit)
 
-    run_add(ctx, "194817794556", "180")
+    run_add(ctx, "200000000011", "180")
 
-    lookup_gtin.assert_called_once_with("194817794556")
+    lookup_gtin.assert_called_once_with("200000000011")
     create_unit.assert_called_once_with(
         InventoryUnitInput(
             location="DEMO",
@@ -107,7 +107,7 @@ def test_scanner_command_looks_up_variant_creates_unit_and_reports_id(monkeypatc
             product_name="AETHER TEST SHOE",
             size="10",
             cost=180.0,
-            source_identifier="194817794556",
+            source_identifier="200000000011",
             stockx_product_id="",
             stockx_variant_id="",
         ),
@@ -123,7 +123,7 @@ def test_scanner_command_requires_default_location_for_shortcut(monkeypatch):
     ctx = make_ctx()
     monkeypatch.delenv(inventory.DEFAULT_LOCATION_ENV_VAR, raising=False)
 
-    run_add(ctx, "194817794556", "180")
+    run_add(ctx, "200000000011", "180")
 
     ctx.send.assert_awaited_once_with(
         "Set `INVENTORY_DEFAULT_LOCATION` in `.env` to use `!add <UPC/GTIN> <price>`."
@@ -135,7 +135,7 @@ def test_add_command_rejects_wrong_channel(monkeypatch):
     to_thread = AsyncMock()
     monkeypatch.setattr(inventory.asyncio, "to_thread", to_thread)
 
-    run_add(ctx, "194817794556", "180")
+    run_add(ctx, "200000000011", "180")
 
     ctx.send.assert_awaited_once_with(
         f"This command can only be used in the <#{inventory.CHANNEL_ID}> channel."
@@ -166,8 +166,8 @@ def test_item_display_uses_after_tax_total_as_cost():
 
 
 @pytest.mark.parametrize("args", [
-    ("194817794556", "100"),
-    ("DEMO", "today", "194817794556", "100"),
+    ("200000000011", "100"),
+    ("DEMO", "today", "200000000011", "100"),
     ("DEMO", "today", "QX1001-200", "10.5", "100"),
 ])
 def test_optional_discount_preserves_all_add_formats(args):
@@ -180,7 +180,7 @@ def test_optional_discount_preserves_all_add_formats(args):
 
 @pytest.mark.parametrize("discount,expected", [("0%", 100), ("100%", 0), ("12.5%", 87.5)])
 def test_discount_boundaries(discount, expected):
-    assert inventory.parse_add_arguments(("194817794556", "100", discount), "DEMO")[-1] == expected
+    assert inventory.parse_add_arguments(("200000000011", "100", discount), "DEMO")[-1] == expected
 
 
 @pytest.mark.parametrize("discount", ["-1%", "101%", "NaN%", "Infinity%", "abc%", "%", "30%%"])
@@ -188,13 +188,13 @@ def test_invalid_discount_rejected_before_lookup(monkeypatch, discount):
     worker = AsyncMock()
     monkeypatch.setattr(inventory.asyncio, "to_thread", worker)
     ctx = make_ctx()
-    run_add(ctx, "194817794556", "100", discount)
+    run_add(ctx, "200000000011", "100", discount)
     assert "Discount must" in ctx.send.await_args.args[0]
     worker.assert_not_awaited()
 
 
 def test_discount_rounds_to_cents():
-    assert inventory.parse_add_arguments(("194817794556", "10.05", "50%"), "DEMO")[-1] == 5.03
+    assert inventory.parse_add_arguments(("200000000011", "10.05", "50%"), "DEMO")[-1] == 5.03
 
 
 def test_discounted_price_reaches_inventory_with_tax(monkeypatch):
@@ -210,6 +210,6 @@ def test_discounted_price_reaches_inventory_with_tax(monkeypatch):
     create_mock = Mock(side_effect=create)
     monkeypatch.setattr(inventory, "create_inventory_unit", create_mock)
     ctx = make_ctx()
-    run_add(ctx, "194817794556", "100", "30%")
+    run_add(ctx, "200000000011", "100", "30%")
     create_mock.assert_called_once()
     assert "Cost `$79.10`" in ctx.send.await_args.args[0]

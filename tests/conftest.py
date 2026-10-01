@@ -7,8 +7,9 @@ import pytest
 
 # Clear inherited deployment settings before application modules are imported.
 for name in list(os.environ):
-    if name.startswith(("STOCKX_", "DISCORD_", "GOOGLE_CREDS_", "OPENAI_")) or name in {
+    if name.startswith(("STOCKX_", "DISCORD_", "GOOGLE_CREDS_", "OPENAI_", "AWS_", "DATABASE_")) or name in {
         "SHEET_ID", "INVENTORY_DATABASE_PATH", "INVENTORY_DEFAULT_LOCATION",
+        "CREDENTIALS_BACKEND", "APPLICATION_SECRET_ARN", "DEPLOYMENT_BUCKET",
     } or name.endswith("_CHANNEL_ID"):
         os.environ.pop(name, None)
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"

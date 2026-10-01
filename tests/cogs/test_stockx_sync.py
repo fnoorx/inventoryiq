@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from cogs import stockx_sync
 from services.stockx_order_sheet_sync import StockxOrderSheetUpdate, StockxOrderSyncResult
@@ -217,3 +217,32 @@ def test_plain_sync_message_ignores_other_content(monkeypatch):
 
     message.channel.send.assert_not_awaited()
     to_thread.assert_not_awaited()
+
+
+def test_start_polling_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("STOCKX_SYNC_POLL_ENABLED", "0")
+    cog = stockx_sync.StockxSync(bot=object())
+    change_interval = Mock()
+    start = Mock()
+    monkeypatch.setattr(cog.stockx_sync_poll, "change_interval", change_interval)
+    monkeypatch.setattr(cog.stockx_sync_poll, "start", start)
+
+    cog.start_polling()
+
+    change_interval.assert_not_called()
+    start.assert_not_called()
+
+
+def test_start_polling_is_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("STOCKX_SYNC_POLL_ENABLED", raising=False)
+    monkeypatch.delenv("STOCKX_SYNC_POLL_INTERVAL_MINUTES", raising=False)
+    cog = stockx_sync.StockxSync(bot=object())
+    change_interval = Mock()
+    start = Mock()
+    monkeypatch.setattr(cog.stockx_sync_poll, "change_interval", change_interval)
+    monkeypatch.setattr(cog.stockx_sync_poll, "start", start)
+
+    cog.start_polling()
+
+    change_interval.assert_called_once_with(minutes=stockx_sync.DEFAULT_POLL_INTERVAL_MINUTES)
+    start.assert_called_once_with()

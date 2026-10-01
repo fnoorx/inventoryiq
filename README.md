@@ -1,14 +1,13 @@
 <h1 align="center">InventoryIQ</h1>
 
 <p align="center">
-  An inventory, pricing, and sales reconciliation system for a resale business,
-  operated through Discord commands and Google Sheets. It finds profitable products at
-  retail, tracks every unit as permanent inventory, and reconciles sales back from StockX.
+  A Discord bot I built to run a real resale business. It finds products worth buying,
+  keeps track of every item in stock, and records sales automatically.
 </p>
 
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-178%20passing-2ECC71">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-280%20passing-2ECC71">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
@@ -16,22 +15,23 @@
   <img src="docs/scraper-demo.gif" alt="Catalogue scraper running: a retailer catalogue is scrolled, then Discord receives an alert listing new products with retail price, market value and profitability" width="900">
 </p>
 
-Built and operated since 2023 for a real resale business (**1,000+ sales and $150K+ CAD in
-transactions**) and deployed on two other operators' machines. This repository is the
-public edition: the code is the real application, with the retailer, credentials and
-business data replaced by synthetic values so it can be read and run anywhere.
+## Impact
 
-The production deployment runs on AWS (ECS Fargate, RDS PostgreSQL) with Docker,
-Terraform, and a GitHub Actions CI/CD pipeline. This public edition uses SQLite so it
-runs anywhere without setup; the PostgreSQL support and infrastructure code are being
-ported here and will be added soon.
+- **Used in a real business since 2023:** over **1,000 sales** and **$150K+ CAD** in transactions.
+- **Used by two other resellers** on their own computers, not just by me.
+- **Cut launch product review from about 15 minutes to about 3.**
+- **Moved 1,100+ existing spreadsheet rows** into the system with **zero duplicate IDs**.
+- **Now runs on AWS**, so it no longer depends on my laptop being on.
+
+This is the public version of the project. The code is the real code. I replaced the
+store names, logins, and business data with made-up examples so anyone can read and run it.
 
 ---
 
 ## Try it in 60 seconds
 
-No Discord server, API keys, or `.env` needed. The demo runs the core logic against
-synthetic data and a temporary SQLite database.
+You don't need Discord, API keys, or any setup. The demo runs the main logic on fake
+data with a temporary database.
 
 ```bash
 git clone https://github.com/fnoorx/inventoryiq.git
@@ -44,88 +44,135 @@ python demo.py
 python -m pytest -q
 ```
 
-`demo.py` prints a catalogue diff (new products + price changes), a market estimate, and
-then creates an inventory unit twice from the same message to show that the second call
-returns the existing ID instead of allocating a new one.
+The demo finds new products and price changes, estimates profit, and adds an item to
+inventory. Then it tries to add the same item again, to show the bot never counts one
+item twice.
 
 ---
+
+## The problem
+
+Reselling means a lot of manual work: checking store websites for new products, looking
+up what each one sells for, tracking every pair in a spreadsheet, and marking items as
+sold. It's slow, and small mistakes (a duplicate row, a missed sale) cost real money.
+
+I built InventoryIQ so the team could do all of this from Discord in a few seconds.
 
 ## What it does
 
-Discord is the operator interface. A typical day:
-
-1. **Find deals.** `!scrape` diffs the retailer catalogue against the last snapshot and
-   posts new products and price changes. `!check 30` prices every saved style against
-   StockX assuming a 30% retail discount and posts the ones that clear the profit threshold.
-2. **Buy within a budget.** `!launch 500` scrapes the retailer's launch page for sizes
-   that are actually in stock, checks each size on StockX, and solves a 0/1 knapsack to
-   pick the highest-profit set of items that fits $500.
-3. **Log what arrived.** `!add`, or `!photo` with a picture of the box label. Each item
-   gets a permanent `INV-000123` ID in SQLite and a row in the shared Google Sheet.
-4. **Look things up.** Type a style code or `INV-` ID in the market channel for live
-   StockX prices per size.
-5. **Close the loop.** Every 3 hours (or on `sync`) the bot pulls payout-ready StockX
-   orders, matches them to unsold Sheet rows by style and size, and marks them sold.
+1. **Finds deals.** `!scrape` checks a store's catalogue and posts anything new or any
+   price change. `!check 30` works out which products are profitable at 30% off.
+2. **Picks what to buy on a budget.** `!launch 500` checks which sizes are in stock, looks
+   up their resale prices, and picks the most profitable set of items that fits in $500.
+3. **Logs new stock.** `!add` or a photo of the box label. Every item gets a permanent ID
+   like `INV-000123` and a row in the team's Google Sheet.
+4. **Looks up prices.** Type a style code to see live StockX prices for every size.
+5. **Records sales automatically.** Every 3 hours the bot pulls finished StockX sales,
+   finds the matching item in the Sheet, and marks it as sold.
 
 <p align="center">
   <img src="docs/knapsack-demo.png" alt="!launch 200 result: two products selected within a $200 budget, each embed showing retail price, real cost after tax, selected size, StockX net sale, profit and ROI" width="620">
-  <br><sub><code>!launch 200</code>: the knapsack picks the two items whose combined real cost fits the budget with the highest projected profit.</sub>
+  <br><sub><code>!launch 200</code>: the bot picks the two items with the highest profit that fit in a $200 budget.</sub>
 </p>
 
 ---
 
-## Engineering highlights
+## What I'm proud of
 
-The parts worth reading, each linked to the file that implements it.
+**No item is ever counted twice.** Each item gets a permanent ID that is never reused.
+If Discord sends the same command twice, or two people add something at the same time,
+the bot returns the item that already exists instead of making a copy.
+([`inventory_repository.py`](services/inventory_repository.py))
 
-**Permanent inventory identities.** [`services/inventory_repository.py`](services/inventory_repository.py)
-IDs come from an append-only SQLite sequence table guarded by triggers, so a number is
-never reused. Creation is keyed by the Discord message that requested it: replaying the
-same message returns the existing unit. 1,100+ historical Sheet rows were backfilled
-through the same path with zero duplicate identities.
+**The spreadsheet can fail without losing data.** The database is the source of truth and
+saves first. If Google Sheets is down, the item is marked to retry later, and the retry
+can't create a duplicate row. ([`inventory_service.py`](services/inventory_service.py))
 
-**A Sheet mirror that can fail without corrupting state.** [`services/inventory_service.py`](services/inventory_service.py)
-SQLite commits first; the Sheet write is a second step that records `retry_pending` on
-failure. `!inventoryretry` re-syncs by looking up the existing ID in the Sheet before
-writing, so a retry can never allocate a second ID or append a duplicate row.
-
-**A StockX client that survives real traffic.** [`services/stockx.py`](services/stockx.py)
-One process-wide gate spaces every request (worker threads included), with separate
-retry tiers for 401 (refresh the token once), 429 (honour `Retry-After`) and network
-errors (3s/8s backoff). Style codes are matched exactly, including StockX's
-slash-delimited combined styles, so a search never silently returns a related product.
-
-**Photo intake with conflict detection.** [`services/label_intake.py`](services/label_intake.py) · [`services/label_preprocessing.py`](services/label_preprocessing.py) · [`services/barcode_decoder.py`](services/barcode_decoder.py)
-A box-label photo is perspective-corrected with OpenCV, decoded with zxing-cpp, and read
-by a vision model into a Pydantic schema. Evidence is ranked (decoded barcode, then
-vision-read UPC, then printed style code) and every path cross-checks StockX's answer
-against the label. Disagreement produces a `conflict` state for human review, never a
-guess.
+**It reads box labels from a photo.** It straightens the photo, scans the barcode, and
+uses an AI vision model to read the label. Then it checks every answer against StockX.
+If the barcode and the label disagree, it asks a person instead of guessing.
+([`label_intake.py`](services/label_intake.py))
 
 <p align="center">
   <img src="docs/product-card.png" alt="!check result card: product name, style codes, best StockX size, cost with tax, average sale, highest bid, lowest ask and estimated profit, with retailer and StockX links" width="520">
-  <br><sub><code>!check</code>: one card per profitable style: cost after tax, StockX market values, and the size that maximises profit.</sub>
+  <br><sub><code>!check</code>: one card per profitable product, with cost after tax, resale prices, and the best size to buy.</sub>
 </p>
 
-**Launch scraper to profitability to knapsack.** [`services/launch/`](services/launch/)
-Detail pages are fetched in parallel from the retailer's embedded Next.js state, filtered
-to target sizes before any StockX call, market-checked once per unique style, then reduced
-to one candidate per product so the 0/1 knapsack (integer cents, [`ranking.py`](services/launch/ranking.py))
-can't recommend the same product twice. Product review went from ~15 minutes to ~3.
+**It handles StockX's limits.** All requests go through one shared rate limiter, with
+automatic retries when a login token expires or the API says to slow down.
+([`stockx.py`](services/stockx.py))
 
-**Versioned schema with backwards-compatible migrations.** [`services/database_schema.py`](services/database_schema.py)
-`PRAGMA user_version` tracks the schema; legacy databases on other operators' machines
-upgrade in place (e.g. the ambiguous `cost` column became `price_paid` + `total_cost`).
+**Budget picking is a real algorithm.** Choosing the best items within a budget is the
+classic "knapsack" problem. I solve it with exact money math (in cents), and it never
+recommends the same product twice. ([`ranking.py`](services/launch/ranking.py))
 
-**Offline test suite.** [`tests/`](tests/)
-178 tests with a socket guard that fails any test attempting a real network call.
-Integrations are exercised through injected fakes, including the ambiguous photo-intake
-cases (barcode/label mismatch, multiple variants, unreadable sizes).
+**It's well tested.** 280 automated tests, and they can't touch the internet: any test that
+tries to make a real network call fails. That means the whole suite runs anywhere, for free.
+([`tests/`](tests/))
 
 <p align="center">
   <img src="docs/market-data-demo.gif" alt="Market lookup: typing a style code and size in the market channel returns average sale, highest bid, lowest ask, Flex and Beat US prices" width="800">
-  <br><sub>Market lookup: a style code and size typed into the channel; the reply is live StockX data for that exact variant.</sub>
+  <br><sub>Price lookup: type a style code and size, and the bot replies with live StockX prices.</sub>
 </p>
+
+---
+
+## Moving it to the cloud (AWS)
+
+At first the bot only worked while my laptop was on. I moved it to AWS so it runs on
+its own, and used the move to learn how real production systems are set up.
+
+- **Docker** packages the bot so it runs the same way on my laptop and in the cloud.
+- **ECS Fargate** runs the bot without me managing a server.
+- **RDS PostgreSQL** replaced the local database file. It's private (not reachable from
+  the internet) and backed up automatically every day.
+- **Secrets Manager** holds every password and API key. None of them are in the code,
+  and the database password can change without restarting the bot.
+- **Terraform** describes all of the infrastructure as code, so it's easy to review and
+  rebuild. ([`infra/aws/`](infra/aws/))
+- **Alembic** manages database changes, and I wrote a tool that copies all the data
+  between the old and new database and checks that every record matches.
+
+A few decisions I made on purpose:
+
+- **Only one bot runs at a time.** During an update, the old bot stops before the new
+  one starts, so two copies can never edit the inventory at once.
+- **It's cheap to run.** No load balancer or extra networking that the bot doesn't need.
+- **It's easy to undo.** Every version is kept, so going back is a one-line change. The
+  bot can also move back to running locally without losing data.
+
+You can still run everything locally with SQLite and no AWS account. The full setup
+guide is in [DEPLOYMENT.md](infra/aws/production/DEPLOYMENT.md).
+
+---
+
+## How it's built
+
+```
+                          Discord (the team)
+                                  |
+ +--------------------------------v--------------------------------+
+ |  bot.py         starts the bot                                  |
+ |  cogs/          one file per Discord channel: reads the         |
+ |                 command and calls one service                   |
+ +--------------------------------+--------------------------------+
+                                  |
+ +--------------------------------v--------------------------------+
+ |  services/      all the business logic                          |
+ +-----+----------+----------+----------+----------+----------+----+
+       |          |          |          |          |          |
+    SQLite /   Google     StockX     Store      Chrome      OpenAI
+    Postgres   Sheets     API        websites   (Selenium)  vision
+```
+
+- **`cogs/`** only handle Discord: read the command, call one service, send the reply.
+- **`services/`** hold all the real logic. Outside tools (Sheets, StockX, the AI model)
+  are passed in, so tests can swap them for fakes.
+- Slow work runs in the background, so Discord never freezes.
+
+**Tech:** Python, discord.py, SQLAlchemy, PostgreSQL, SQLite, Alembic, Docker, AWS (ECS
+Fargate, RDS, Secrets Manager, S3, CloudWatch), Terraform, Selenium, OpenCV, OpenAI,
+Google Sheets API, StockX API, pytest.
 
 ---
 
@@ -133,120 +180,47 @@ cases (barcode/label mismatch, multiple variants, unreadable sizes).
 
 | Command | What it does |
 |---|---|
-| `!add <UPC> <price> [discount%]` | Add an item by scanning its box barcode; StockX resolves product and size. |
-| `!add <location> <date> <style> <size> <price> [discount%]` | Add an item by style code. Price is pre-tax; `30%` applies a discount first. |
-| `!photo [price]` + image | Research a box-label photo; buttons to add to inventory, see all sizes, edit, or cancel. |
-| `!item INV-000123` | Show one unit: cost, location, status, Sheet row, sync state. |
-| `!inventoryretry [INV-…]` | Re-sync units whose Sheet write failed. |
-| `!backfillinventory CONFIRM` | Assign permanent IDs to existing Sheet rows; audits malformed and duplicate IDs. |
-| `<style> [size]` or `INV-…` | Typed in the market channel: live StockX prices. Also `!market`. |
-| `!scrape` | Diff the catalogue against the last snapshot; post new products and price changes. |
-| `!check <discount%>` | Price every saved style against StockX and post the profitable ones. |
-| `!brand [apparel\|footwear]` | Scan the brand's full public catalogue with Selenium and check profitability. |
-| `!launch [budget]` | Scrape launch stock, check StockX, rank by ROI, or knapsack within a budget. |
-| `sync` / `!sync` | Reconcile payout-ready StockX orders into the Sheet (also polled every 3 h). |
-
----
-
-## Architecture
-
-A single Python process. discord.py owns the event loop; every command handler hands
-off to a synchronous service function in a worker thread, so slow HTTP, Selenium and
-SQLite work never blocks Discord.
-
-```
-                          Operators (Discord)
-                                  |
-                     commands / messages / buttons
-                                  |
- +--------------------------------v--------------------------------+
- |  bot.py         loads cogs, opt-in live startup                 |
- |  cogs/          one cog per channel: parse input, call one      |
- |                 service in a worker thread, format the reply    |
- +--------------------------------+--------------------------------+
-                                  |  asyncio.to_thread
- +--------------------------------v--------------------------------+
- |  services/      all domain logic; external clients injected     |
- |                                                                 |
- |   inventory_service      pricing / sizes       launch/ knapsack |
- |   inventory_repository   scrape_catalogue      label_intake     |
- |   stockx client          catalogue_profit.     barcode / vision |
- |   stockx_order_sync      brand_catalogue       database_schema  |
- +-----+----------+----------+----------+----------+----------+----+
-       |          |          |          |          |          |
-    SQLite     Google     StockX    Retailer   Selenium    OpenAI
-    (local)    Sheets     REST API  HTTP/JSON  + Chrome    vision
-    IDs,       shared     market,   catalogue, brand-wide  box-label
-    units,     ledger     GTIN,     launch     scan        read
-    scans                 orders    stock
-```
-
-**Layers and the rules between them**
-
-- `cogs/` never touch persistence or HTTP. They validate input, call exactly one
-  service function, and render embeds or button views. Channel routing lives in
-  [`utils/channels.py`](utils/channels.py).
-- `services/` hold every decision the business depends on. External clients (Sheets,
-  StockX, the scrapers, the vision model) are passed in as parameters, which is what
-  lets the whole suite run offline against fakes.
-- `utils/` are thin adapters: OAuth token cache for StockX, the gspread client, text
-  and currency formatting.
-
-**Data stores and what is authoritative**
-
-| Store | Holds | Role |
-|---|---|---|
-| SQLite (`inventory_units`, `inventory_id_sequence`, `label_scans`) | Permanent `INV-` IDs, unit cost and status, sync state, photo-intake results | Source of truth. Schema versioned with `PRAGMA user_version`; migrations upgrade old databases in place. |
-| Google Sheet (`Sales` worksheet) | One row per unit: cost, location, sale, payout | Shared ledger operators read and edit. Written second; failures are recorded as `retry_pending`, never allowed to mint a new ID. |
-| JSON state files (`data/`) | Last seen retailer catalogue; processed StockX order numbers | Baseline for `!scrape` diffs; idempotency record for order sync. |
-
-**The two write paths that matter**
-
-1. *Inbound (buying).* `!add` / `!photo` resolve the product against StockX, insert the
-   unit in SQLite inside one transaction keyed by the Discord message ID, then append
-   the Sheet row. Replaying the message returns the existing unit.
-2. *Outbound (selling).* `stockx_sync` polls payout-ready StockX orders on a timer,
-   matches each to the first unsold Sheet row with the same style and size, marks it sold
-   with payout details, and records the order so it is never applied twice.
-
-**Deployment**
-
-Production runs the same process as a Docker container on AWS ECS Fargate, with the
-database on RDS PostgreSQL, secrets in Secrets Manager, and Terraform for the
-infrastructure. A GitHub Actions pipeline runs the suite, builds the image, and applies
-migrations before deploy. This edition swaps the database for a local SQLite file and
-drops the infrastructure code so it runs with no setup; both are being ported over.
+| `!add <UPC> <price> [discount%]` | Add an item by scanning its barcode. |
+| `!add <location> <date> <style> <size> <price> [discount%]` | Add an item by style code. `30%` takes 30% off first. |
+| `!photo [price]` + image | Read a box-label photo, then add it, edit it, or cancel. |
+| `!item INV-000123` | Show one item: cost, location, status, and Sheet row. |
+| `!inventoryretry [INV-…]` | Retry items that didn't save to the Sheet. |
+| `!backfillinventory CONFIRM` | Give permanent IDs to rows already in the Sheet. |
+| `<style> [size]` or `INV-…` | In the market channel: live StockX prices. Also `!market`. |
+| `!scrape` | Post new products and price changes from the store catalogue. |
+| `!check <discount%>` | Post every saved product that's profitable at that discount. |
+| `!brand [apparel\|footwear]` | Scan the brand's full catalogue in a real browser and check profit. |
+| `!launch [budget]` | Rank in-stock launch items by profit, or pick the best set for a budget. |
+| `sync` / `!sync` | Mark finished StockX sales as sold in the Sheet (also runs every 3 hours). |
 
 ---
 
 ## Running it live
 
-The bot only starts when you opt in, and it needs your own accounts:
+The bot only connects to real accounts if you turn that on, and it needs your own keys:
 
 ```bash
 cp .env.example .env    # then fill in the values below
 python bot.py
 ```
 
-| Setting | Needed for |
+| Setting | What it's for |
 |---|---|
-| `ENABLE_LIVE_INTEGRATIONS=true`, `DISCORD_TOKEN`, `*_CHANNEL_ID` | Starting the bot and routing each command to its channel |
-| `STOCKX_*` | Market data, GTIN lookup, order sync (StockX developer API) |
-| `SHEET_ID`, `GOOGLE_CREDS_*` | The inventory Sheet (service account, `Sales` worksheet) |
-| `OPENAI_API_KEY` | Vision read of box labels in `!photo` |
-| `PURCHASE_TAX_PERCENT`, `PURCHASE_DISCOUNT_PERCENT` | Cost assumptions; defaults are 13% tax, 0% discount |
+| `ENABLE_LIVE_INTEGRATIONS=true`, `DISCORD_TOKEN`, `*_CHANNEL_ID` | Starting the bot and choosing a channel for each command |
+| `STOCKX_*` | Prices, barcode lookups, and sales (StockX developer API) |
+| `SHEET_ID`, `GOOGLE_CREDS_*` | The inventory Google Sheet |
+| `OPENAI_API_KEY` | Reading box-label photos |
+| `PURCHASE_TAX_PERCENT`, `PURCHASE_DISCOUNT_PERCENT` | Cost settings (default: 13% tax, no discount) |
+| `DATABASE_URL` (optional) | Use PostgreSQL instead of the local SQLite file. `compose.yaml` starts one, then run `alembic upgrade head`. |
 
-`!brand` drives a real browser through Selenium, so it also needs Google Chrome installed
-(Selenium Manager fetches the matching driver automatically). Everything else, including
-the OpenCV / zxing-cpp photo pipeline, is covered by `requirements.txt`.
+`!brand` uses a real Chrome browser, so Google Chrome needs to be installed.
 
 ---
 
-## About this edition
+## About this version
 
-This is the public edition of a private application. The retailer integrations point at
-`brand.example.test` / `catalogue.example.test`, product names and style codes in tests
-and demos are fictional, and no credentials, databases, or business records are included.
-The application logic, persistence layer, and tests are the real ones.
+This is the public version of a private project. Store websites point to
+`brand.example.test` and `catalogue.example.test`, and the products, codes, and barcodes in
+the tests and demo are made-up examples. No passwords, databases, or business records are included.
 
 Licensed under [MIT](LICENSE).

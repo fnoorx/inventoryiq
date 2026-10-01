@@ -1,14 +1,13 @@
-"""StockX OAuth token cache with refresh persisted to the local .env file."""
+"""StockX OAuth token cache; refreshed tokens persist to .env or AWS Secrets Manager."""
 
 from datetime import UTC, datetime, timedelta
 import os
 import threading
 
-from dotenv import load_dotenv, set_key
 import requests
 
-ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
-ENV_PATH = os.path.join(ROOT_DIR, ".env")
+from services.credentials import ENV_PATH, load_stockx_tokens, save_stockx_tokens
+
 ACCESS_TOKEN_URL = "https://accounts.stockx.com/oauth/token"
 
 token_store = {
@@ -21,30 +20,16 @@ TOKEN_REQUEST_TIMEOUT_SECONDS = 20
 DEFAULT_TOKEN_EXPIRES_IN_SECONDS = 12 * 60 * 60
 
 
-def reload_env():
-    load_dotenv(ENV_PATH, override=True)
-
-
-def save_tokens_to_env(access_token, refresh_token):
-    """Persist tokens to .env so they survive restarts."""
-
-    set_key(ENV_PATH, "STOCKX_ACCESS_TOKEN", access_token)
-    set_key(ENV_PATH, "STOCKX_REFRESH_TOKEN", refresh_token)
-
-
 def store_tokens(data):
-    """Update in-memory store and .env from a token response."""
+    """Persist refreshed tokens before publishing them to the running process."""
 
-    token_store["access_token"] = data["access_token"]
-    token_store["refresh_token"] = data.get("refresh_token", token_store["refresh_token"])
+    access_token = data["access_token"]
+    refresh_token = data.get("refresh_token", token_store["refresh_token"])
     expires_in = data.get("expires_in", DEFAULT_TOKEN_EXPIRES_IN_SECONDS)
-    token_store["expires_at"] = datetime.now(UTC) + timedelta(seconds=expires_in - 300)
+    expires_at = datetime.now(UTC) + timedelta(seconds=expires_in - 300)
 
-    save_tokens_to_env(
-        token_store["access_token"],
-        token_store["refresh_token"],
-    )
-    reload_env()
+    save_stockx_tokens(access_token, refresh_token, ENV_PATH)
+    token_store.update(access_token=access_token, refresh_token=refresh_token, expires_at=expires_at)
     print(f"[token] stored - expires at {token_store['expires_at'].isoformat()}")
 
 
@@ -111,15 +96,21 @@ def get_valid_access_token(rejected_token: str | None = None):
 def ensure_valid_token():
     """Ensure the process has a usable StockX access token.
 
-    Supply your own StockX tokens through environment configuration.
+    Supply your own StockX tokens through environment configuration. A token
+    this process already refreshed is reused until it expires.
     """
-    reload_env()
-    token_store["access_token"] = os.getenv("STOCKX_ACCESS_TOKEN")
-    token_store["refresh_token"] = os.getenv("STOCKX_REFRESH_TOKEN")
 
-    if token_store["refresh_token"]:
-        print("[startup] found existing refresh token - attempting refresh")
-        if refresh_access_token():
+    with _token_refresh_lock:
+        # expires_at is only set after this process refreshes, so startup still refreshes once.
+        if token_store["expires_at"] and not token_needs_refresh():
             return token_store["access_token"]
 
-    return token_store["access_token"]
+        token_store.update(load_stockx_tokens(ENV_PATH))
+        token_store["expires_at"] = None
+
+        if token_store["refresh_token"]:
+            print("[startup] found existing refresh token - attempting refresh")
+            if refresh_access_token():
+                return token_store["access_token"]
+
+        return token_store["access_token"]

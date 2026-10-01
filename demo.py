@@ -49,6 +49,7 @@ def main():
         assert created and not created_again and first.inventory_id == repeated.inventory_id
         print(f"{first.inventory_id}: Price Paid ${first.price_paid:.2f}; Total ${first.total_cost:.2f}")
         print("Replaying the same message reuses its inventory ID.")
+        repository.engine.dispose()  # Release the file so the temporary folder can be removed.
     print("Finished. Temporary demo database removed; no external accounts contacted.")
 
 

@@ -1,9 +1,9 @@
-import json
 from types import SimpleNamespace
 
 import pytest
 
 from services.inventory_repository import InventoryRepository, InventoryUnitInput
+from services.processed_order_repository import ProcessedOrderRepository
 from services.stockx_order_sheet_sync import (
     ACTIVE_PAYOUT_READY_STATUSES,
     HISTORICAL_COMPLETED_STATUS,
@@ -14,12 +14,10 @@ from services.stockx_order_sheet_sync import (
     find_processed_row_needing_repair,
     history_lookback_dates,
     iter_payout_ready_orders,
-    load_processed_order_numbers,
     normalize_sheet_date,
     normalize_size,
     order_needs_detail,
     order_sheet_payload,
-    save_processed_order_numbers,
     set_row_values,
     split_sheet_style_codes,
     stockx_search_url,
@@ -301,7 +299,7 @@ def test_sync_updates_matching_row_and_persists_processed_order_state(tmp_path):
         ["A", "2026-01-01", "", "", "", "Footwear", "QX1001-200", "Shoe", "10", "120", "55", "", "", "21.81"],
     ]
     sheet = FakeSheet(rows)
-    state_path = tmp_path / "stockx_state.json"
+    database_path = tmp_path / "sync.db"
     orders = [
         {
             "orderNumber": "100000001-100000002",
@@ -316,7 +314,7 @@ def test_sync_updates_matching_row_and_persists_processed_order_state(tmp_path):
     result = sync_stockx_payout_ready_orders(
         sheet=sheet,
         orders=orders,
-        state_path=state_path,
+        database_path=database_path,
     )
 
     assert len(result.updated) == 1
@@ -333,10 +331,7 @@ def test_sync_updates_matching_row_and_persists_processed_order_state(tmp_path):
             {"range": "C2", "values": [["2026-07-01"]]},
         ]
     ]
-    assert load_processed_order_numbers(state_path) == {"100000001-100000002"}
-
-    saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert saved["processed_order_numbers"] == ["100000001-100000002"]
+    assert ProcessedOrderRepository(database_path).list_order_numbers() == {"100000001-100000002"}
 
 
 def test_sync_includes_inventory_id_and_updates_sqlite_status(tmp_path):
@@ -372,7 +367,7 @@ def test_sync_includes_inventory_id_and_updates_sqlite_status(tmp_path):
                 "payout": {"totalPayout": "76.81"},
             }
         ],
-        state_path=tmp_path / "stockx_state.json",
+        database_path=repository.database_path,
         inventory_repository=repository,
     )
 
@@ -393,7 +388,7 @@ def test_sync_persists_each_successful_order_before_later_failure(tmp_path):
         ["A", "2026-01-02", "", "", "", "Footwear", "QX1009-800", "Shoe", "9.5", "150", "55", "", "", "47.25"],
     ]
     sheet = FailingSecondBatchSheet(rows)
-    state_path = tmp_path / "stockx_state.json"
+    database_path = tmp_path / "sync.db"
     orders = [
         {
             "orderNumber": "first-order",
@@ -417,10 +412,10 @@ def test_sync_persists_each_successful_order_before_later_failure(tmp_path):
         sync_stockx_payout_ready_orders(
             sheet=sheet,
             orders=orders,
-            state_path=state_path,
+            database_path=database_path,
         )
 
-    assert load_processed_order_numbers(state_path) == {"first-order"}
+    assert ProcessedOrderRepository(database_path).list_order_numbers() == {"first-order"}
 
 
 def test_sync_skips_previously_processed_order(tmp_path):
@@ -429,8 +424,8 @@ def test_sync_skips_previously_processed_order(tmp_path):
         ["A", "2026-01-01", "", "", "", "Footwear", "QX1001-200", "Shoe", "10", ""],
     ]
     sheet = FakeSheet(rows)
-    state_path = tmp_path / "stockx_state.json"
-    save_processed_order_numbers({"100000001-100000002"}, state_path)
+    database_path = tmp_path / "sync.db"
+    ProcessedOrderRepository(database_path).add("100000001-100000002")
 
     result = sync_stockx_payout_ready_orders(
         sheet=sheet,
@@ -444,7 +439,7 @@ def test_sync_skips_previously_processed_order(tmp_path):
                 "payout": {"totalPayout": "76.81"},
             }
         ],
-        state_path=state_path,
+        database_path=database_path,
     )
 
     assert result.updated == []
@@ -458,8 +453,8 @@ def test_sync_repairs_blank_payout_for_previously_processed_order(tmp_path):
         ["A", "2026-01-01", "07/01/2026", "Sold", "StockX", "Footwear", "QX1001-200", "Shoe", "10", "76.81", "55", "", "", "21.81"],
     ]
     sheet = FakeSheet(rows)
-    state_path = tmp_path / "stockx_state.json"
-    save_processed_order_numbers({"100000001-100000002"}, state_path)
+    database_path = tmp_path / "sync.db"
+    ProcessedOrderRepository(database_path).add("100000001-100000002")
 
     result = sync_stockx_payout_ready_orders(
         sheet=sheet,
@@ -473,7 +468,7 @@ def test_sync_repairs_blank_payout_for_previously_processed_order(tmp_path):
                 "payout": {"totalPayout": "76.81"},
             }
         ],
-        state_path=state_path,
+        database_path=database_path,
     )
 
     assert len(result.updated) == 1

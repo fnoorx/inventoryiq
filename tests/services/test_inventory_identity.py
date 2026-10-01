@@ -126,7 +126,7 @@ def sample_input(name="AETHER TEST SHOE"):
         product_name=name,
         size="10",
         cost=180.0,
-        source_identifier="194817794556",
+        source_identifier="200000000011",
         stockx_product_id="product-1",
         stockx_variant_id="variant-1",
     )

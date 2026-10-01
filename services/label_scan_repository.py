@@ -1,15 +1,16 @@
-"""Transactional SQLite persistence for temporary shoe-label scan drafts."""
+"""Transactional persistence for temporary shoe-label scan drafts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import sqlite3
 from uuid import uuid4
 
-from services.database import connect, transaction
-from services.database_schema import ensure_database_schema
+from sqlalchemy import or_, select, update
+
+from services.database import create_repository_engine, insert_ignoring_conflicts
+from services.database_tables import label_scans
 from services.inventory_repository import resolve_database_path, utc_now
 
 
@@ -50,11 +51,13 @@ class LabelScan:
 
 
 class LabelScanRepository:
-    """Use a short-lived connection and explicit transaction per scan operation."""
+    """Run each scan operation in its own explicit transaction."""
 
     def __init__(self, database_path: str | Path | None = None):
         self.database_path = resolve_database_path(database_path)
-        ensure_database_schema(self.database_path)
+        # Only an explicit path overrides DATABASE_URL; related repositories reuse it.
+        self.explicit_database_path = database_path
+        self.engine = create_repository_engine(database_path)
 
     def create_or_get(
         self,
@@ -71,53 +74,54 @@ class LabelScanRepository:
         image_hash = _required_text(image_sha256, "Image SHA-256").lower()
         now = utc_now()
 
-        with transaction(self.database_path) as connection:
-            existing = connection.execute(
-                """
-                SELECT * FROM label_scans
-                WHERE discord_message_id = ?
-                   OR (discord_message_id = ? AND discord_attachment_id = ?)
-                   OR image_sha256 = ?
-                LIMIT 1
-                """,
-                (message_id, message_id, attachment_id, image_hash),
-            ).fetchone()
-            if existing:
-                # Re-sending the same photo with a price updates the open draft.
-                if (
-                    supplied_price is not None
-                    and existing["linked_inventory_id"] is None
-                    and existing["state"] not in {SCAN_CANCELLED, SCAN_CONFIRMED}
-                ):
-                    connection.execute(
-                        """
-                        UPDATE label_scans
-                        SET supplied_price = ?, location = ?, purchase_date = ?, updated_at = ?
-                        WHERE scan_id = ?
-                        """,
-                        (float(supplied_price), location, purchase_date, now, existing["scan_id"]),
+        with self.engine.begin() as connection:
+            existing = _find_duplicate(connection, message_id, image_hash)
+            if existing is None:
+                scan_id = f"SCAN-{uuid4().hex[:16].upper()}"
+                inserted = connection.execute(
+                    insert_ignoring_conflicts(connection, label_scans).values(
+                        scan_id=scan_id,
+                        discord_message_id=message_id,
+                        discord_attachment_id=attachment_id,
+                        image_sha256=image_hash,
+                        state=SCAN_RECEIVED,
+                        validation_status=SCAN_RECEIVED,
+                        supplied_price=supplied_price,
+                        location=location,
+                        purchase_date=purchase_date,
+                        created_at=now,
+                        updated_at=now,
                     )
-                    existing = _select_scan(connection, existing["scan_id"])
-                return _scan_from_row(existing), False
+                ).first()
+                if inserted is not None:
+                    return _scan_from_row(_select_scan(connection, scan_id)), True
 
-            scan_id = f"SCAN-{uuid4().hex[:16].upper()}"
-            connection.execute(
-                """
-                INSERT INTO label_scans (
-                    scan_id, discord_message_id, discord_attachment_id,
-                    image_sha256, state, validation_status, supplied_price,
-                    location, purchase_date, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    scan_id, message_id, attachment_id, image_hash, SCAN_RECEIVED, SCAN_RECEIVED,
-                    supplied_price, location, purchase_date, now, now,
-                ),
-            )
-            return _scan_from_row(_select_scan(connection, scan_id)), True
+                # A concurrent upload stored the same message or image first.
+                existing = _find_duplicate(connection, message_id, image_hash)
+                if existing is None:
+                    raise RuntimeError("Label scan insert conflicted without a duplicate.")
+
+            # Re-sending the same photo with a price updates the open draft.
+            if (
+                supplied_price is not None
+                and existing["linked_inventory_id"] is None
+                and existing["state"] not in {SCAN_CANCELLED, SCAN_CONFIRMED}
+            ):
+                connection.execute(
+                    update(label_scans)
+                    .where(label_scans.c.scan_id == existing["scan_id"])
+                    .values(
+                        supplied_price=float(supplied_price),
+                        location=location,
+                        purchase_date=purchase_date,
+                        updated_at=now,
+                    )
+                )
+                existing = _select_scan(connection, existing["scan_id"])
+            return _scan_from_row(existing), False
 
     def get(self, scan_id: str) -> LabelScan | None:
-        with connect(self.database_path) as connection:
+        with self.engine.connect() as connection:
             row = _select_scan(connection, str(scan_id).strip().upper())
         return _scan_from_row(row) if row else None
 
@@ -136,31 +140,19 @@ class LabelScanRepository:
         warnings: list[str],
         error_details: str | None = None,
     ) -> LabelScan:
-        now = utc_now()
         self._update(
-            """
-            UPDATE label_scans
-            SET state = ?, barcode_results_json = ?, raw_vision_json = ?,
-                normalized_extraction_json = ?, market_data_json = ?,
-                stockx_product_id = ?, stockx_variant_id = ?,
-                validation_status = ?, warning_details_json = ?,
-                error_details = ?, updated_at = ?
-            WHERE scan_id = ?
-            """,
-            (
-                state,
-                _json_dump(barcode_results),
-                _json_dump(raw_vision),
-                _json_dump(normalized_extraction),
-                _json_dump(market_data),
-                stockx_product_id,
-                stockx_variant_id,
-                validation_status,
-                _json_dump(warnings),
-                error_details,
-                now,
-                scan_id,
-            ),
+            scan_id,
+            state=state,
+            barcode_results_json=_json_dump(barcode_results),
+            raw_vision_json=_json_dump(raw_vision),
+            normalized_extraction_json=_json_dump(normalized_extraction),
+            market_data_json=_json_dump(market_data),
+            stockx_product_id=stockx_product_id,
+            stockx_variant_id=stockx_variant_id,
+            validation_status=validation_status,
+            warning_details_json=_json_dump(warnings),
+            error_details=error_details,
+            updated_at=utc_now(),
         )
         return self._get_required(scan_id)
 
@@ -173,65 +165,69 @@ class LabelScanRepository:
         purchase_date: str,
     ) -> LabelScan:
         self._update(
-            """
-            UPDATE label_scans
-            SET supplied_price = ?, location = ?, purchase_date = ?, updated_at = ?
-            WHERE scan_id = ? AND linked_inventory_id IS NULL
-            """,
-            (supplied_price, location, purchase_date, utc_now(), scan_id),
+            scan_id,
+            require_unlinked=True,
+            supplied_price=supplied_price,
+            location=location,
+            purchase_date=purchase_date,
+            updated_at=utc_now(),
         )
         return self._get_required(scan_id)
 
     def mark_confirmed(self, scan_id: str, inventory_id: str) -> LabelScan:
+        normalized_id = str(scan_id).strip().upper()
         now = utc_now()
-        with transaction(self.database_path) as connection:
-            row = _select_scan(connection, scan_id)
+        with self.engine.begin() as connection:
+            row = _select_scan(connection, normalized_id)
             if row is None:
                 raise KeyError(f"Label scan was not found: {scan_id}")
             linked = row["linked_inventory_id"]
             if linked and linked != inventory_id:
                 raise ValueError(f"Scan {scan_id} is already linked to inventory item {linked}")
             connection.execute(
-                """
-                UPDATE label_scans
-                SET state = ?, validation_status = ?, linked_inventory_id = ?,
-                    confirmed_at = COALESCE(confirmed_at, ?), updated_at = ?
-                WHERE scan_id = ?
-                """,
-                (SCAN_CONFIRMED, SCAN_CONFIRMED, inventory_id, now, now, scan_id),
+                update(label_scans)
+                .where(label_scans.c.scan_id == normalized_id)
+                .values(
+                    state=SCAN_CONFIRMED,
+                    validation_status=SCAN_CONFIRMED,
+                    linked_inventory_id=inventory_id,
+                    confirmed_at=row["confirmed_at"] or now,
+                    updated_at=now,
+                )
             )
-            return _scan_from_row(_select_scan(connection, scan_id))
+            return _scan_from_row(_select_scan(connection, normalized_id))
 
     def mark_cancelled(self, scan_id: str) -> LabelScan:
         scan = self._get_required(scan_id)
         if scan.linked_inventory_id:
             raise ValueError("A confirmed label scan cannot be cancelled.")
         self._update(
-            """
-            UPDATE label_scans
-            SET state = ?, validation_status = ?, updated_at = ?
-            WHERE scan_id = ?
-            """,
-            (SCAN_CANCELLED, SCAN_CANCELLED, utc_now(), scan_id),
+            scan_id,
+            state=SCAN_CANCELLED,
+            validation_status=SCAN_CANCELLED,
+            updated_at=utc_now(),
         )
         return self._get_required(scan_id)
 
     def mark_failed(self, scan_id: str, error: object) -> LabelScan:
         self._update(
-            """
-            UPDATE label_scans
-            SET state = ?, validation_status = ?, error_details = ?, updated_at = ?
-            WHERE scan_id = ?
-            """,
-            (SCAN_FAILED, SCAN_FAILED, str(error)[:4000], utc_now(), scan_id),
+            scan_id,
+            state=SCAN_FAILED,
+            validation_status=SCAN_FAILED,
+            error_details=str(error)[:4000],
+            updated_at=utc_now(),
         )
         return self._get_required(scan_id)
 
-    def _update(self, statement: str, parameters: tuple) -> None:
-        with connect(self.database_path) as connection, connection:
-            cursor = connection.execute(statement, parameters)
-            if cursor.rowcount != 1:
-                raise KeyError(f"Label scan was not found or cannot be changed: {parameters[-1]}")
+    def _update(self, scan_id: str, *, require_unlinked: bool = False, **values: object) -> None:
+        normalized_id = str(scan_id).strip().upper()
+        statement = update(label_scans).where(label_scans.c.scan_id == normalized_id)
+        if require_unlinked:
+            statement = statement.where(label_scans.c.linked_inventory_id.is_(None))
+        with self.engine.begin() as connection:
+            result = connection.execute(statement.values(**values))
+            if result.rowcount != 1:
+                raise KeyError(f"Label scan was not found or cannot be changed: {normalized_id}")
 
     def _get_required(self, scan_id: str) -> LabelScan:
         scan = self.get(scan_id)
@@ -240,11 +236,26 @@ class LabelScanRepository:
         return scan
 
 
-def _select_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row | None:
-    return connection.execute("SELECT * FROM label_scans WHERE scan_id = ?", (scan_id,)).fetchone()
+def _find_duplicate(connection, message_id: str, image_hash: str):
+    return connection.execute(
+        select(label_scans)
+        .where(
+            or_(
+                label_scans.c.discord_message_id == message_id,
+                label_scans.c.image_sha256 == image_hash,
+            )
+        )
+        .limit(1)
+    ).mappings().first()
 
 
-def _scan_from_row(row: sqlite3.Row) -> LabelScan:
+def _select_scan(connection, scan_id: str):
+    return connection.execute(
+        select(label_scans).where(label_scans.c.scan_id == scan_id)
+    ).mappings().first()
+
+
+def _scan_from_row(row) -> LabelScan:
     values = dict(row)
     return LabelScan(
         scan_id=values["scan_id"],

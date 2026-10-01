@@ -26,7 +26,7 @@ def sample_extraction():
         product_name="W Aether Meridian Pace 3",
         raw_style_code="QX1002 300",
         normalized_style_code="QX1002-300",
-        upc_candidates=["0196604444156"],
+        upc_candidates=["0200000000028"],
         sizes=[
             VisibleSize(system="US_W", value="9"),
             VisibleSize(system="US_M", value="7.5"),

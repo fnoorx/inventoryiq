@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 from services.barcode_decoder import BarcodeResult
+from services.database_schema import ensure_database_schema
 from services.inventory_repository import InventoryRepository, InventoryUnitInput, SYNC_FAILED
 from services.label_intake import (
     cancel_label_scan,
@@ -36,7 +37,7 @@ def meridian_vision(style="QX1002-300"):
         product_name="W Aether Meridian Pace 3",
         raw_style_code=style.replace("-", " "),
         normalized_style_code=style,
-        upc_candidates=["0196604444156"],
+        upc_candidates=["0200000000028"],
         sizes=[
             VisibleSize(system="US_W", value="9"),
             VisibleSize(system="US_M", value="7.5"),
@@ -52,7 +53,7 @@ def meridian_vision(style="QX1002-300"):
 
 def meridian_lookup(style="QX1002-300"):
     return StockxGtinLookupResult(
-        gtin="0196604444156",
+        gtin="0200000000028",
         product_id="product-meridian",
         variant_id="variant-9w",
         variant_value="W 9",
@@ -66,11 +67,11 @@ def meridian_lookup(style="QX1002-300"):
 
 def local_barcode(valid=True):
     return BarcodeResult(
-        text="0196604444156" if valid else "0196604444157",
+        text="0200000000028" if valid else "0200000000029",
         format="EAN13",
         source_variant="original",
         valid_checksum=valid,
-        gtin="0196604444156" if valid else "0196604444157",
+        gtin="0200000000028" if valid else "0200000000029",
     )
 
 
@@ -129,27 +130,27 @@ def test_second_supplied_turfline_label_verifies_style_and_size(tmp_path):
         product_name="Aether Turfline Pro",
         raw_style_code="QX1008 700",
         normalized_style_code="QX1008-700",
-        upc_candidates=["0198726649396"],
+        upc_candidates=["0200000000035"],
         sizes=[
             VisibleSize(system="US_M", value="8.5"),
             VisibleSize(system="UK", value="7.5"),
             VisibleSize(system="EU", value="42"),
             VisibleSize(system="CM", value="26.5"),
         ],
-        raw_visible_text="TURFLINE 360 UT QX1008 700 8.5",
+        raw_visible_text="TURFLINE PRO QX1008 700 8.5",
         warnings=[],
         unreadable_fields=[],
     )
     barcode = BarcodeResult(
-        text="0198726649396",
+        text="0200000000035",
         format="EAN13",
         source_variant="original",
         valid_checksum=True,
-        gtin="0198726649396",
+        gtin="0200000000035",
     )
     lookup = StockxGtinLookupResult(
-        gtin="0198726649396",
-        product_id="product-vapor-edge",
+        gtin="0200000000035",
+        product_id="product-turfline",
         variant_id="variant-8-5",
         variant_value="M 8.5",
         normalized_size="8.5",
@@ -411,3 +412,24 @@ def test_scan_migration_and_identity_deduplication_are_idempotent(tmp_path):
             )
         }
     assert "label_scans" in tables
+
+
+def test_confirmation_writes_inventory_to_configured_database_url(tmp_path, monkeypatch):
+    configured = tmp_path / "configured.db"
+    stray = tmp_path / "stray.db"
+    ensure_database_schema(configured)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{configured.as_posix()}")
+    monkeypatch.setenv("INVENTORY_DATABASE_PATH", str(stray))
+    scan_repository = LabelScanRepository()
+    result = process(tmp_path, scan_repository=scan_repository, supplied_price=180)
+
+    confirmed = confirm_label_scan(
+        result.scan.scan_id,
+        scan_repository=scan_repository,
+        sheet=FakeInventorySheet([inventory_header(with_id=True)]),
+    )
+
+    with sqlite3.connect(configured) as connection:
+        stored = connection.execute("SELECT inventory_id FROM inventory_units").fetchall()
+    assert stored == [(confirmed.item.inventory_id,)]
+    assert not stray.exists()

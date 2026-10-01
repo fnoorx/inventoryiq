@@ -705,7 +705,7 @@ def confirm_label_scan(
 
     scan_repository = scan_repository or LabelScanRepository()
     inventory_repository = inventory_repository or InventoryRepository(
-        scan_repository.database_path
+        scan_repository.explicit_database_path
     )
     scan = scan_repository.get(scan_id)
     if scan is None:

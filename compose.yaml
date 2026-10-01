@@ -1,0 +1,21 @@
+# Local PostgreSQL for trying the PostgreSQL code path. Not used by default.
+# Set DATABASE_URL=postgresql+psycopg://inventoryiq:local-development-only@127.0.0.1:5432/inventoryiq
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: inventoryiq
+      POSTGRES_USER: inventoryiq
+      POSTGRES_PASSWORD: local-development-only
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - inventoryiq_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventoryiq -d inventoryiq"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  inventoryiq_pgdata:

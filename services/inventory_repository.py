@@ -1,36 +1,30 @@
-"""SQLite persistence for permanent physical inventory identities."""
+"""Database persistence for permanent physical inventory identities."""
 
 from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 import re
-import sqlite3
 
-from services.database import connect, transaction
-from services.database_schema import ensure_database_schema
+from sqlalchemy import insert, select, update
+from sqlalchemy.exc import IntegrityError
+
+from services.database import (
+    advance_postgresql_sequence,
+    create_repository_engine,
+    insert_ignoring_conflicts,
+)
+from services.database_config import resolve_database_path
+from services.database_tables import inventory_id_sequence, inventory_units
 from services.pricing import calculate_total_cost
 
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DATABASE_PATH = ROOT_DIR / "data" / "inventoryiq.db"
-DATABASE_PATH_ENV_VAR = "INVENTORY_DATABASE_PATH"
 INVENTORY_ID_PATTERN = re.compile(r"^INV-(\d{6}|[1-9]\d{6,})$")
 
 SYNC_PENDING = "pending"
 SYNCED = "synced"
 SYNC_FAILED = "retry_pending"
-
-INSERT_UNIT_SQL = """
-    INSERT INTO inventory_units (
-        inventory_id, location, purchase_date, item_type, style_code,
-        product_name, size, price_paid, total_cost, status, source_identifier,
-        stockx_product_id, stockx_variant_id, sheet_row,
-        sheet_sync_status, discord_message_id, created_at, updated_at, sheet_synced_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
 
 
 @dataclass(frozen=True)
@@ -85,28 +79,23 @@ class InventoryUnit:
     sheet_synced_at: str | None
 
 
-def resolve_database_path(database_path: str | Path | None = None) -> Path:
-    return Path(database_path or os.getenv(DATABASE_PATH_ENV_VAR) or DEFAULT_DATABASE_PATH)
-
-
 def is_valid_inventory_id(value: object) -> bool:
     match = INVENTORY_ID_PATTERN.fullmatch(str(value or "").strip().upper())
     return bool(match and int(match.group(1)) > 0)
 
 
 class InventoryRepository:
-    """Permanent inventory identities backed by SQLite.
+    """Permanent inventory identities in SQLite or PostgreSQL.
 
     IDs come from an append-only sequence table, so a number is never reused
     even if a unit is later removed. Creation is keyed by the Discord message
     that requested it: replaying the same message returns the existing unit
-    instead of allocating another ID. Each operation opens its own short-lived
-    connection; writes run inside explicit transactions.
+    instead of allocating another ID, even when two requests race.
     """
 
     def __init__(self, database_path: str | Path | None = None):
         self.database_path = resolve_database_path(database_path)
-        ensure_database_schema(self.database_path)
+        self.engine = create_repository_engine(database_path)
 
     def create_unit(
         self,
@@ -119,21 +108,39 @@ class InventoryRepository:
         message_id = _optional_text(discord_message_id)
         now = utc_now()
 
-        with transaction(self.database_path) as connection:
+        with self.engine.begin() as connection:
             if message_id:
-                existing = _select_unit(connection, "discord_message_id", message_id)
+                existing = _select_unit(connection, inventory_units.c.discord_message_id, message_id)
                 if existing:
                     return existing, False
 
-            cursor = connection.execute(
-                "INSERT INTO inventory_id_sequence(allocated_at) VALUES (?)", (now,)
-            )
-            inventory_id = format_inventory_id(cursor.lastrowid)
-            connection.execute(
-                INSERT_UNIT_SQL,
-                _unit_parameters(inventory_id, values, sheet_row, SYNC_PENDING, message_id, now, None),
-            )
-            return _select_unit(connection, "inventory_id", inventory_id), True
+            try:
+                # A savepoint lets a concurrent duplicate undo its ID allocation.
+                with connection.begin_nested():
+                    inventory_id = format_inventory_id(
+                        connection.execute(
+                            insert(inventory_id_sequence)
+                            .values(allocated_at=now)
+                            .returning(inventory_id_sequence.c.sequence_number)
+                        ).scalar_one()
+                    )
+                    connection.execute(
+                        insert(inventory_units).values(
+                            **_unit_values(values, sheet_row, now),
+                            inventory_id=inventory_id,
+                            sheet_sync_status=SYNC_PENDING,
+                            discord_message_id=message_id,
+                        )
+                    )
+            except IntegrityError:
+                existing = message_id and _select_unit(
+                    connection, inventory_units.c.discord_message_id, message_id
+                )
+                if not existing:
+                    raise
+                return existing, False
+
+            return _select_unit(connection, inventory_units.c.inventory_id, inventory_id), True
 
     def import_unit(
         self,
@@ -150,67 +157,70 @@ class InventoryRepository:
 
         sequence_number = int(match.group(1))
         now = utc_now()
-        with transaction(self.database_path) as connection:
-            existing = _select_unit(connection, "inventory_id", normalized_id)
+        with self.engine.begin() as connection:
+            existing = _select_unit(connection, inventory_units.c.inventory_id, normalized_id)
             if existing:
                 return existing, False
 
-            already_allocated = connection.execute(
-                "SELECT 1 FROM inventory_id_sequence WHERE sequence_number = ?",
-                (sequence_number,),
-            ).fetchone()
-            if already_allocated:
+            allocation = connection.execute(
+                insert_ignoring_conflicts(connection, inventory_id_sequence).values(
+                    sequence_number=sequence_number, allocated_at=now
+                )
+            ).first()
+            if allocation is None:
+                # A concurrent import may have just claimed this ID for the same unit.
+                existing = _select_unit(connection, inventory_units.c.inventory_id, normalized_id)
+                if existing:
+                    return existing, False
                 raise ValueError(f"Inventory ID was already allocated: {normalized_id}")
 
             connection.execute(
-                "INSERT INTO inventory_id_sequence(sequence_number, allocated_at) VALUES (?, ?)",
-                (sequence_number, now),
+                insert(inventory_units).values(
+                    **_unit_values(values, sheet_row, now),
+                    inventory_id=normalized_id,
+                    sheet_sync_status=SYNCED,
+                    sheet_synced_at=now,
+                )
             )
-            connection.execute(
-                INSERT_UNIT_SQL,
-                _unit_parameters(normalized_id, values, sheet_row, SYNCED, None, now, now),
-            )
-            return _select_unit(connection, "inventory_id", normalized_id), True
+            advance_postgresql_sequence(connection, sequence_number)
+            return _select_unit(connection, inventory_units.c.inventory_id, normalized_id), True
 
     def get(self, inventory_id: str) -> InventoryUnit | None:
-        with connect(self.database_path) as connection:
-            return _select_unit(connection, "inventory_id", str(inventory_id).strip().upper())
+        with self.engine.connect() as connection:
+            return _select_unit(
+                connection, inventory_units.c.inventory_id, str(inventory_id).strip().upper()
+            )
 
     def get_by_sheet_row(self, sheet_row: int) -> InventoryUnit | None:
-        with connect(self.database_path) as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM inventory_units
-                WHERE sheet_row = ?
-                ORDER BY created_at DESC, inventory_id DESC
-                LIMIT 1
-                """,
-                (sheet_row,),
-            ).fetchone()
+        statement = (
+            select(inventory_units)
+            .where(inventory_units.c.sheet_row == sheet_row)
+            .order_by(inventory_units.c.created_at.desc(), inventory_units.c.inventory_id.desc())
+            .limit(1)
+        )
+        with self.engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
         return _unit_from_row(row) if row else None
 
     def list_retry_pending(self) -> list[InventoryUnit]:
-        with connect(self.database_path) as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM inventory_units
-                WHERE sheet_sync_status != ?
-                ORDER BY inventory_id
-                """,
-                (SYNCED,),
-            ).fetchall()
+        statement = (
+            select(inventory_units)
+            .where(inventory_units.c.sheet_sync_status != SYNCED)
+            .order_by(inventory_units.c.inventory_id)
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
         return [_unit_from_row(row) for row in rows]
 
     def mark_sheet_synced(self, inventory_id: str, sheet_row: int) -> InventoryUnit:
         now = utc_now()
         self._update(
-            """
-            UPDATE inventory_units
-            SET sheet_row = ?, sheet_sync_status = ?, sheet_sync_error = NULL,
-                sheet_synced_at = ?, updated_at = ?
-            WHERE inventory_id = ?
-            """,
-            (sheet_row, SYNCED, now, now, inventory_id),
+            inventory_id,
+            sheet_row=sheet_row,
+            sheet_sync_status=SYNCED,
+            sheet_sync_error=None,
+            sheet_synced_at=now,
+            updated_at=now,
         )
         return self._get_required(inventory_id)
 
@@ -221,26 +231,21 @@ class InventoryRepository:
         total_cost: float,
         sheet_row: int,
     ) -> InventoryUnit:
-        now = utc_now()
         self._update(
-            """
-            UPDATE inventory_units
-            SET price_paid = ?, total_cost = ?, sheet_row = ?, updated_at = ?
-            WHERE inventory_id = ?
-            """,
-            (float(price_paid), float(total_cost), sheet_row, now, inventory_id),
+            inventory_id,
+            price_paid=float(price_paid),
+            total_cost=float(total_cost),
+            sheet_row=sheet_row,
+            updated_at=utc_now(),
         )
         return self._get_required(inventory_id)
 
     def mark_sheet_sync_failed(self, inventory_id: str, error: object) -> InventoryUnit:
-        now = utc_now()
         self._update(
-            """
-            UPDATE inventory_units
-            SET sheet_sync_status = ?, sheet_sync_error = ?, updated_at = ?
-            WHERE inventory_id = ?
-            """,
-            (SYNC_FAILED, str(error)[:2000], now, inventory_id),
+            inventory_id,
+            sheet_sync_status=SYNC_FAILED,
+            sheet_sync_error=str(error)[:2000],
+            updated_at=utc_now(),
         )
         return self._get_required(inventory_id)
 
@@ -250,23 +255,25 @@ class InventoryRepository:
         status: str,
         sheet_row: int,
     ) -> InventoryUnit | None:
-        now = utc_now()
-        with connect(self.database_path) as connection, connection:
+        normalized_id = str(inventory_id).strip().upper()
+        with self.engine.begin() as connection:
             connection.execute(
-                """
-                UPDATE inventory_units
-                SET status = ?, sheet_row = ?, updated_at = ?
-                WHERE inventory_id = ?
-                """,
-                (status, sheet_row, now, str(inventory_id).strip().upper()),
+                update(inventory_units)
+                .where(inventory_units.c.inventory_id == normalized_id)
+                .values(status=status, sheet_row=sheet_row, updated_at=utc_now())
             )
-        return self.get(inventory_id)
+        return self.get(normalized_id)
 
-    def _update(self, statement: str, parameters: tuple) -> None:
-        with connect(self.database_path) as connection, connection:
-            cursor = connection.execute(statement, parameters)
-            if cursor.rowcount != 1:
-                raise KeyError(f"Inventory item was not found: {parameters[-1]}")
+    def _update(self, inventory_id: str, **values: object) -> None:
+        normalized_id = str(inventory_id).strip().upper()
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(inventory_units)
+                .where(inventory_units.c.inventory_id == normalized_id)
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"Inventory item was not found: {normalized_id}")
 
     def _get_required(self, inventory_id: str) -> InventoryUnit:
         item = self.get(inventory_id)
@@ -288,36 +295,30 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def _select_unit(connection: sqlite3.Connection, column: str, value) -> InventoryUnit | None:
-    row = connection.execute(
-        f"SELECT * FROM inventory_units WHERE {column} = ?", (value,)
-    ).fetchone()
+def _select_unit(connection, column, value) -> InventoryUnit | None:
+    row = connection.execute(select(inventory_units).where(column == value)).mappings().first()
     return _unit_from_row(row) if row else None
 
 
-def _unit_parameters(inventory_id, values, sheet_row, sync_status, message_id, now, synced_at):
-    return (
-        inventory_id,
-        values.location,
-        values.purchase_date,
-        values.item_type,
-        values.style_code,
-        values.product_name,
-        values.size,
-        float(values.price_paid),
-        float(values.total_cost),
-        values.status,
-        values.source_identifier,
-        values.stockx_product_id,
-        values.stockx_variant_id,
-        sheet_row,
-        sync_status,
-        message_id,
-        now,
-        now,
-        synced_at,
-    )
+def _unit_values(values: InventoryUnitInput, sheet_row: int | None, now: str) -> dict:
+    return {
+        "location": values.location,
+        "purchase_date": values.purchase_date,
+        "item_type": values.item_type,
+        "style_code": values.style_code,
+        "product_name": values.product_name,
+        "size": values.size,
+        "price_paid": float(values.price_paid),
+        "total_cost": float(values.total_cost),
+        "status": values.status,
+        "source_identifier": values.source_identifier,
+        "stockx_product_id": values.stockx_product_id,
+        "stockx_variant_id": values.stockx_variant_id,
+        "sheet_row": sheet_row,
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
-def _unit_from_row(row: sqlite3.Row) -> InventoryUnit:
+def _unit_from_row(row) -> InventoryUnit:
     return InventoryUnit(**dict(row))

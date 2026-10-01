@@ -16,11 +16,11 @@ def sample_scan(**overrides):
         "state": SCAN_VERIFIED,
         "barcode_results": [
             {
-                "text": "0196604444156",
+                "text": "0200000000028",
                 "format": "EAN13",
                 "source_variant": "original",
                 "valid_checksum": True,
-                "gtin": "0196604444156",
+                "gtin": "0200000000028",
             }
         ],
         "raw_vision": {},
@@ -33,7 +33,7 @@ def sample_scan(**overrides):
                 {"system": "US_W", "value": "9", "normalized": "9W"},
                 {"system": "US_M", "value": "7.5", "normalized": "7.5"},
             ],
-            "gtin": "0196604444156",
+            "gtin": "0200000000028",
             "product_type": "sneakers",
             "source": "barcode",
         },
@@ -90,7 +90,7 @@ def test_preview_embed_contains_required_label_market_and_estimate_fields():
     assert "9W" in fields["Product"]
     assert "US_W 9" in fields["Printed sizes"]
     assert "US_M 7.5" in fields["Printed sizes"]
-    assert "0196604444156" in fields["Barcode"]
+    assert "0200000000028" in fields["Barcode"]
     assert "Average sale: $300.00" in fields["Exact StockX market (CAD)"]
     assert "Cost (after tax): $203.40" in fields["Purchase estimate"]
     assert "Estimated profit: $63.60" in fields["Purchase estimate"]

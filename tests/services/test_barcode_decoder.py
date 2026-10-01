@@ -21,7 +21,7 @@ from services.label_preprocessing import (
 
 
 def test_decode_supported_barcode_and_deduplicates_rotations(monkeypatch):
-    decoded = SimpleNamespace(text="0196604444156", format="EAN-13")
+    decoded = SimpleNamespace(text="0200000000028", format="EAN-13")
     calls = []
 
     def read_barcodes(image):
@@ -41,12 +41,12 @@ def test_decode_supported_barcode_and_deduplicates_rotations(monkeypatch):
 
     assert len(results) == 1
     assert len(calls) == 1
-    assert results[0].gtin == "0196604444156"
+    assert results[0].gtin == "0200000000028"
     assert results[0].valid_checksum is True
 
 
 def test_decode_barcodes_skips_byte_identical_preprocessing_variants(monkeypatch):
-    decoded = SimpleNamespace(text="0196604444156", format="EAN-13")
+    decoded = SimpleNamespace(text="0200000000028", format="EAN-13")
     calls = []
     monkeypatch.setattr(
         barcode_decoder.zxingcpp,
@@ -71,8 +71,8 @@ def test_decode_barcodes_skips_byte_identical_preprocessing_variants(monkeypatch
 
 
 def test_invalid_barcode_check_digit_is_rejected():
-    assert validate_gtin_check_digit("0196604444156") is True
-    assert validate_gtin_check_digit("0196604444157") is False
+    assert validate_gtin_check_digit("0200000000028") is True
+    assert validate_gtin_check_digit("0200000000029") is False
     assert validate_gtin_check_digit("123") is False
 
 

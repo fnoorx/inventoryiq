@@ -26,6 +26,9 @@ class StockxSync(commands.Cog):
         self._sync_lock = asyncio.Lock()
 
     def start_polling(self):
+        # STOCKX_SYNC_POLL_ENABLED=0 keeps a test container from writing to the Sheet.
+        if os.getenv("STOCKX_SYNC_POLL_ENABLED", "1") == "0":
+            return
         self.stockx_sync_poll.change_interval(minutes=poll_interval_minutes())
         if not self.stockx_sync_poll.is_running():
             self.stockx_sync_poll.start()

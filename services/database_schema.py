@@ -7,7 +7,7 @@ import sqlite3
 import threading
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 _schema_lock = threading.RLock()
 _initialized_files: dict[Path, tuple[int, int] | None] = {}
@@ -42,6 +42,9 @@ def ensure_database_schema(database_path: str | Path) -> None:
                 )
             if current_version < 1:
                 migrate_to_version_1(connection)
+            if current_version < 2:
+                migrate_to_version_2(connection)
+            if current_version < CURRENT_SCHEMA_VERSION:
                 connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             connection.commit()
         except Exception:
@@ -141,6 +144,18 @@ def migrate_to_version_1(connection: sqlite3.Connection) -> None:
     )
     migrate_inventory_cost_columns(connection)
     migrate_label_scan_optional_columns(connection)
+
+
+def migrate_to_version_2(connection: sqlite3.Connection) -> None:
+    """Track processed StockX orders in the database instead of a JSON state file."""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_stockx_orders (
+            order_number TEXT PRIMARY KEY
+        )
+        """
+    )
 
 
 def migrate_inventory_cost_columns(connection: sqlite3.Connection) -> None:

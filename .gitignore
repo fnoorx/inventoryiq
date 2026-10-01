@@ -24,6 +24,10 @@ tmp/
 *.tfplan
 *.tfvars
 *.tfvars.json
+backend.hcl
+backups/
+volumes/
+.aws/
 .DS_Store
 .vscode/
 .idea/

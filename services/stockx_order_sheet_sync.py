@@ -4,23 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-import json
-import os
 from pathlib import Path
 import time
 from typing import Iterable
 from urllib.parse import quote_plus
 
 from services.inventory_repository import InventoryRepository, is_valid_inventory_id
+from services.processed_order_repository import ProcessedOrderRepository
 from services.sheets import a1_cell, get_inventory_sheet, inventory_id_column_from_headers, sheet_value
 from services.sizes import normalize_size
 from services.stockx import BASE_URL, get_json
 from utils.performance import record_timing, timed
 from utils.text import clean_text, is_blank, to_float
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_STATE_PATH = ROOT_DIR / "data" / "stockx_order_sync_state.json"
-STATE_PATH_ENV_VAR = "STOCKX_SYNC_STATE_PATH"
 DEFAULT_PAGE_SIZE = 100
 ACTIVE_PAYOUT_READY_STATUSES = ("PAYOUTPENDING", "PAYOUTCOMPLETED")
 HISTORICAL_COMPLETED_STATUS = "COMPLETED"
@@ -87,16 +83,16 @@ class StockxOrderSyncResult:
 def sync_stockx_payout_ready_orders(
     sheet=None,
     orders: Iterable[dict] | None = None,
-    state_path: str | Path | None = None,
     worksheet_name: str | None = None,
     history_lookback_days: int = DEFAULT_HISTORY_LOOKBACK_DAYS,
     inventory_repository: InventoryRepository | None = None,
+    processed_order_repository: ProcessedOrderRepository | None = None,
     database_path: str | Path | None = None,
 ) -> StockxOrderSyncResult:
     """Match payout-ready StockX orders to unsold sheet rows and update them.
 
     Orders are matched by product style code and variant size. The StockX order
-    number is stored only in a local state file so repeated polling is safe
+    number is stored in the application database so repeated polling is safe
     without adding another column to the Google Sheet.
     """
 
@@ -110,8 +106,8 @@ def sync_stockx_payout_ready_orders(
     record_timing("sheets_get_all_values", sheet_read_started, rows=len(rows))
     columns = SHEET_COLUMNS
     inventory_id_column = inventory_id_column_from_headers(rows[0]) if rows else None
-    state_path = resolve_state_path(state_path)
-    processed_order_numbers = load_processed_order_numbers(state_path)
+    order_repository = processed_order_repository or ProcessedOrderRepository(database_path)
+    processed_order_numbers = order_repository.list_order_numbers()
     result = StockxOrderSyncResult()
 
     for order in orders:
@@ -197,8 +193,8 @@ def sync_stockx_payout_ready_orders(
             repository.update_status_and_sheet_row(inventory_id, SOLD_STATUS, row_number)
 
         if not already_processed:
+            order_repository.add(order_number)
             processed_order_numbers.add(order_number)
-            save_processed_order_numbers(processed_order_numbers, state_path)
         result.updated.append(
             StockxOrderSheetUpdate(
                 order_number=order_number,
@@ -518,37 +514,6 @@ def stockx_search_url(style_code: str | None) -> str:
     if not normalized_style:
         return ""
     return f"https://stockx.com/search?s={quote_plus(normalized_style)}"
-
-
-def resolve_state_path(state_path: str | Path | None = None) -> Path:
-    return Path(state_path or os.getenv(STATE_PATH_ENV_VAR) or DEFAULT_STATE_PATH)
-
-
-def load_processed_order_numbers(state_path: str | Path = DEFAULT_STATE_PATH) -> set[str]:
-    path = Path(state_path)
-    if not path.exists():
-        return set()
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-
-    order_numbers = data.get("processed_order_numbers", [])
-    return {clean_text(order_number) for order_number in order_numbers if clean_text(order_number)}
-
-
-def save_processed_order_numbers(
-    processed_order_numbers: set[str],
-    state_path: str | Path = DEFAULT_STATE_PATH,
-) -> None:
-    path = Path(state_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "processed_order_numbers": sorted(processed_order_numbers),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def normalize_order_style_code(value) -> str:

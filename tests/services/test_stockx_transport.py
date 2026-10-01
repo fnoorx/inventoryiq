@@ -133,3 +133,33 @@ def test_rejected_token_reuses_refresh_completed_by_another_request(monkeypatch)
 
 def test_stockx_request_spacing_matches_documented_limit():
     assert stockx.STOCKX_MIN_REQUEST_INTERVAL_SECONDS >= 1.0
+
+
+def test_ensure_valid_token_refreshes_once_until_expiry(monkeypatch):
+    for key in ("access_token", "refresh_token", "expires_at"):
+        monkeypatch.setitem(stockx_api.token_store, key, None)
+    monkeypatch.setattr(
+        stockx_api,
+        "load_stockx_tokens",
+        lambda _path: {"access_token": "stale", "refresh_token": "refresh"},
+    )
+    refresh_calls = []
+
+    def refresh():
+        refresh_calls.append(True)
+        stockx_api.token_store.update(
+            access_token=f"access-{len(refresh_calls)}",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        return True
+
+    monkeypatch.setattr(stockx_api, "refresh_access_token", refresh)
+
+    assert stockx_api.ensure_valid_token() == "access-1"
+    assert stockx_api.ensure_valid_token() == "access-1"
+    assert len(refresh_calls) == 1
+
+    stockx_api.token_store["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+
+    assert stockx_api.ensure_valid_token() == "access-2"
+    assert len(refresh_calls) == 2
