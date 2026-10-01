@@ -1,7 +1,7 @@
 <h1 align="center">InventoryIQ</h1>
 
 <p align="center">
-  A Discord bot I built to run a real resale business. It finds products worth buying,
+  A Discord bot I built to run a real e-commerce business. It finds products worth buying,
   keeps track of every item in stock, and records sales automatically.
 </p>
 
@@ -18,7 +18,7 @@
 ## Impact
 
 - **Used in a real business since 2023:** over **1,000 sales** and **$150K+ CAD** in transactions.
-- **Used by two other resellers** on their own computers, not just by me.
+- **Used by two other sellers** on their own computers, not just by me.
 - **Cut launch product review from about 15 minutes to about 3.**
 - **Moved 1,100+ existing spreadsheet rows** into the system with **zero duplicate IDs**.
 - **Now runs on AWS**, so it no longer depends on my laptop being on.
@@ -52,9 +52,10 @@ item twice.
 
 ## The problem
 
-Reselling means a lot of manual work: checking store websites for new products, looking
-up what each one sells for, tracking every pair in a spreadsheet, and marking items as
-sold. It's slow, and small mistakes (a duplicate row, a missed sale) cost real money.
+Running the business meant a lot of manual work: checking store websites for new
+products, looking up what each one sells for, tracking every pair in a spreadsheet, and
+marking items as sold. It was slow, and small mistakes (a duplicate row, a missed sale)
+cost real money.
 
 I built InventoryIQ so the team could do all of this from Discord in a few seconds.
 
@@ -63,7 +64,7 @@ I built InventoryIQ so the team could do all of this from Discord in a few secon
 1. **Finds deals.** `!scrape` checks a store's catalogue and posts anything new or any
    price change. `!check 30` works out which products are profitable at 30% off.
 2. **Picks what to buy on a budget.** `!launch 500` checks which sizes are in stock, looks
-   up their resale prices, and picks the most profitable set of items that fits in $500.
+   up their market prices, and picks the most profitable set of items that fits in $500.
 3. **Logs new stock.** `!add` or a photo of the box label. Every item gets a permanent ID
    like `INV-000123` and a row in the team's Google Sheet.
 4. **Looks up prices.** Type a style code to see live StockX prices for every size.
@@ -95,7 +96,7 @@ If the barcode and the label disagree, it asks a person instead of guessing.
 
 <p align="center">
   <img src="docs/product-card.png" alt="!check result card: product name, style codes, best StockX size, cost with tax, average sale, highest bid, lowest ask and estimated profit, with retailer and StockX links" width="520">
-  <br><sub><code>!check</code>: one card per profitable product, with cost after tax, resale prices, and the best size to buy.</sub>
+  <br><sub><code>!check</code>: one card per profitable product, with cost after tax, market prices, and the best size to buy.</sub>
 </p>
 
 **It handles StockX's limits.** All requests go through one shared rate limiter, with

@@ -225,7 +225,7 @@ def test_repository_allocates_separate_non_reused_ids_and_is_idempotent(tmp_path
 
 
 def test_repository_uses_environment_path_and_parameterized_values(tmp_path, monkeypatch):
-    database_path = tmp_path / "override" / "resell.db"
+    database_path = tmp_path / "override" / "custom.db"
     monkeypatch.setenv("INVENTORY_DATABASE_PATH", str(database_path))
 
     repository = InventoryRepository()

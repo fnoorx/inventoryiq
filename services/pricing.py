@@ -1,4 +1,4 @@
-"""Purchase-cost and resale-payout assumptions, configurable through the environment."""
+"""Purchase-cost and payout assumptions, configurable through the environment."""
 
 from decimal import Decimal, ROUND_HALF_UP
 import os
